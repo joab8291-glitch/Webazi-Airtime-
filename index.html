@@ -1790,10 +1790,22 @@
     }
 
     try {
-      const clientRequestId = (window.crypto && crypto.randomUUID)
-        ? crypto.randomUUID()
-        : 'wa_' + Date.now() + '_' + Math.random().toString(36).slice(2, 12);
+      const attemptFingerprint = [payNum.replace(/[\\s-]/g, ''), pay, ref].join('|');
+      const previousFingerprint = localStorage.getItem('lastStkAttemptFingerprint');
+      const previousStatus = localStorage.getItem('lastStkAttemptStatus');
+      const previousRequestId = localStorage.getItem('lastStkAttemptRequestId');
+      // Reuse the same idempotency key if the exact same order previously had
+      // an ambiguous network result. Never create a second charge just because
+      // the browser did not receive the first response.
+      const reuseUnknownAttempt = previousStatus === 'outcome_unknown' &&
+        previousFingerprint === attemptFingerprint && previousRequestId;
+      const clientRequestId = reuseUnknownAttempt ? previousRequestId :
+        ((window.crypto && crypto.randomUUID)
+          ? crypto.randomUUID()
+          : 'wa_' + Date.now() + '_' + Math.random().toString(36).slice(2, 12));
       localStorage.setItem('lastStkAttemptRequestId', clientRequestId);
+      localStorage.setItem('lastStkAttemptFingerprint', attemptFingerprint);
+      localStorage.setItem('lastStkAttemptStatus', 'initiating');
       localStorage.setItem('lastOrderPhone', payNum);
       localStorage.setItem('lastOrderRef', ref);
 
@@ -1821,10 +1833,12 @@
 
       // A timeout/ambiguous response is not a failed payment: never send the
       // customer to manual payment instructions or automatically retry.
-      if (data.status === 'outcome_unknown') {
+      if (data.status === 'outcome_unknown' || res.status === 202) {
+        localStorage.setItem('lastStkAttemptStatus', 'outcome_unknown');
         if (data.clientRequestId) localStorage.setItem('lastStkAttemptRequestId', data.clientRequestId);
         showModalState('uncertain');
       } else if (res.ok && (data.CheckoutRequestID || data.ResponseCode === '0' || data.MerchantRequestID)) {
+        localStorage.setItem('lastStkAttemptStatus', 'accepted');
         // Store IDs for later tracking
         if (data.MerchantRequestID) localStorage.setItem('lastMerchantRequestID', data.MerchantRequestID);
         if (data.CheckoutRequestID) localStorage.setItem('lastCheckoutRequestID', data.CheckoutRequestID);
@@ -1843,6 +1857,7 @@
       }
     } catch (err) {
       console.error('STK request network error; outcome may be unknown:', err);
+      localStorage.setItem('lastStkAttemptStatus', 'outcome_unknown');
       showModalState('uncertain');
     } finally {
       if (btn) {
