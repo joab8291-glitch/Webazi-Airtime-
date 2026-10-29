@@ -1608,6 +1608,13 @@
     </div>
 
     <!-- STATE: FALLBACK (manual payment) -->
+    <div id="modal-state-uncertain" style="display:none; text-align:center;">
+      <div style="width:56px;height:56px;background:rgba(255,213,0,0.12);border:1px solid rgba(255,213,0,0.35);border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 16px;color:#ffd500;font-size:1.6rem;">!</div>
+      <h3 style="font-family:'Inter',sans-serif;font-size:1.3rem;font-weight:800;margin-bottom:8px;">Checking Payment Status</h3>
+      <p style="color:#6b8f72;font-size:0.9rem;line-height:1.6;margin-bottom:18px;">We did not receive a definite response from M-PESA. Your request may still have reached your phone. Do not pay manually or submit another request yet. Check your M-PESA messages and contact support if no prompt arrives.</p>
+      <a class="btn-wa" id="modal-wa-btn-uncertain" href="https://wa.me/254729914983" target="_blank" rel="noopener noreferrer">Contact Support on WhatsApp</a>
+      <button type="button" class="btn-ghost" onclick="closeModal()" style="margin:14px auto 0;display:block;">Close</button>
+    </div>
     <div id="modal-state-manual" style="display:none;">
       <div style="text-align:center; margin-bottom:24px;">
         <div style="width:56px; height:56px; background:rgba(0,200,83,0.15); border:1px solid rgba(0,200,83,0.3); border-radius:50%; display:flex; align-items:center; justify-content:center; margin:0 auto 16px; color:#00c853;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="26" height="26"><polyline points="20 6 9 17 4 12"/></svg></div>
@@ -1697,11 +1704,8 @@
   // Matches current GitHub: app.use("/mpesa", stkPushRoutes) + router.post("/stk-push")
   const STK_API_URL = 'https://webazi-digital-solutions.onrender.com/mpesa/stk-push';
   const ORDER_STATUS_URL = 'https://webazi-digital-solutions.onrender.com/mpesa/stk-query';
-  // SECURITY: this key is visible to anyone who views source/devtools on a static
-  // frontend. It gives no real protection. Move STK-push auth to the backend
-  // (e.g. rate-limit/origin-check server-side, or a short-lived token issued per session)
-  // instead of a fixed client-side secret.
-  const STK_API_KEY = 'WebaziPackson2026!';
+  // No static API key is embedded in the browser. The backend applies origin
+  // validation and per-IP rate limits to public customer payment endpoints.
 
   // Basic Kenyan mobile number check: 07XXXXXXXX, 01XXXXXXXX, or +2547XXXXXXXX / +2541XXXXXXXX
   function isValidKenyanPhone(value) {
@@ -1713,6 +1717,8 @@
     document.getElementById('modal-state-loading').style.display = state === 'loading' ? 'block' : 'none';
     document.getElementById('modal-state-stk').style.display = state === 'stk' ? 'block' : 'none';
     document.getElementById('modal-state-manual').style.display = state === 'manual' ? 'block' : 'none';
+    const uncertain = document.getElementById('modal-state-uncertain');
+    if (uncertain) uncertain.style.display = state === 'uncertain' ? 'block' : 'none';
   }
 
   function openPayModal() {
@@ -1784,13 +1790,18 @@
     }
 
     try {
+      const clientRequestId = (window.crypto && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : 'wa_' + Date.now() + '_' + Math.random().toString(36).slice(2, 12);
+      localStorage.setItem('lastStkAttemptRequestId', clientRequestId);
+      localStorage.setItem('lastOrderPhone', payNum);
+      localStorage.setItem('lastOrderRef', ref);
+
       const res = await fetch(STK_API_URL, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': STK_API_KEY
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          clientRequestId,
           phone: payNum,
           amount: pay,
           accountRef: ref,
@@ -1808,8 +1819,12 @@
 
       const data = await res.json();
 
-      // Success if we get CheckoutRequestID or ResponseCode 0
-      if (res.ok && (data.CheckoutRequestID || data.ResponseCode === '0' || data.MerchantRequestID)) {
+      // A timeout/ambiguous response is not a failed payment: never send the
+      // customer to manual payment instructions or automatically retry.
+      if (data.status === 'outcome_unknown') {
+        if (data.clientRequestId) localStorage.setItem('lastStkAttemptRequestId', data.clientRequestId);
+        showModalState('uncertain');
+      } else if (res.ok && (data.CheckoutRequestID || data.ResponseCode === '0' || data.MerchantRequestID)) {
         // Store IDs for later tracking
         if (data.MerchantRequestID) localStorage.setItem('lastMerchantRequestID', data.MerchantRequestID);
         if (data.CheckoutRequestID) localStorage.setItem('lastCheckoutRequestID', data.CheckoutRequestID);
@@ -1817,14 +1832,18 @@
         localStorage.setItem('lastOrderRef', ref);
         showModalState('stk');
       } else {
-        // STK failed → fall back to manual instructions
-        console.warn('STK Push failed, falling back to manual:', data);
-        showModalState('manual');
+        console.warn('STK Push was not accepted:', { status: res.status, error: data.error, stage: data.stage });
+        // Only offer manual instructions when the backend confirms the request
+        // did not reach Daraja. Ambiguous outcomes use the safe uncertainty state.
+        if (data.status === 'outcome_unknown' || res.status === 202) {
+          showModalState('uncertain');
+        } else {
+          showModalState('manual');
+        }
       }
     } catch (err) {
-      console.error('STK request error:', err);
-      // Network / CORS / server error → fall back to manual
-      showModalState('manual');
+      console.error('STK request network error; outcome may be unknown:', err);
+      showModalState('uncertain');
     } finally {
       if (btn) {
         btn.disabled = false;
@@ -1962,10 +1981,7 @@
       if (checkoutId) {
         const res = await fetch(ORDER_STATUS_URL, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': STK_API_KEY
-          },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ checkoutRequestId: checkoutId })
         });
         data = await res.json();
