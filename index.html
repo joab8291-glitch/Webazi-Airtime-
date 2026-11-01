@@ -1811,7 +1811,12 @@
 
       const res = await fetch(STK_API_URL, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        // Public checkout uses server-side safeguards; never send a Daraja/API secret from the browser.
+        credentials: 'omit',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
         body: JSON.stringify({
           clientRequestId,
           phone: payNum,
